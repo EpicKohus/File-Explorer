@@ -22,7 +22,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
+        with:
+          packages: ''
+          
       - name: Build APK
         run: bash ./gradlew assembleDebug --no-daemon
 
