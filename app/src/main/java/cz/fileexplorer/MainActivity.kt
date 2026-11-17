@@ -5,6 +5,10 @@ import android.app.AlertDialog
 import android.content.Intent
 import org.json.JSONArray
 import org.json.JSONObject
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -54,6 +58,10 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import java.util.concurrent.Executors
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+import android.widget.PopupWindow
 
 class MainActivity : Activity() {
     // Set these to your own public donation destinations before publishing.
@@ -124,6 +132,8 @@ class MainActivity : Activity() {
     private val saveRequest = 13
     private val scannerRequest = 215
     private val scanFolderRequest = 216
+    private val scanCopyFolderRequest = 218
+    private var pendingScanCopy: Pair<Uri, String>? = null
     private var scannedPages: List<Uri> = emptyList()
     private var scannedPdf: Uri? = null
     private var scanOutputFormat = "pdf"
@@ -191,22 +201,120 @@ class MainActivity : Activity() {
             else -> en
         }
     }
+    private fun settingsSection(title: String) {
+        root.addView(label(title, 12, accent, true).apply {
+            letterSpacing = 0.12f
+            setPadding(dp(8), dp(19), 0, dp(10))
+        })
+    }
+    private fun settingsItem(icon: String, title: String, subtitle: String, click: () -> Unit) {
+        val line = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = shape(panel, 17); setPadding(dp(14), dp(12), dp(12), dp(12))
+            setOnClickListener { click() }
+        }
+        line.addView(label(icon, 25, accent).apply { gravity = Gravity.CENTER }, LinearLayout.LayoutParams(dp(44), dp(48)))
+        val copy = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(9), 0, 0, 0) }
+        copy.addView(label(title, 16, ink, true))
+        copy.addView(label(subtitle, 12, muted))
+        line.addView(copy, LinearLayout.LayoutParams(0, -2, 1f))
+        line.addView(label("›", 27, muted), LinearLayout.LayoutParams(dp(20), -2))
+        root.addView(line, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(9) })
+    }
+    private fun scrollSettings(title: String, back: () -> Unit) {
+        screen(title)
+        val fixed = root
+        val scroll = ScrollView(this).apply { clipToPadding = false }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(content)
+        fixed.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        root = content
+        settingsItem("‹", translated("Back", "Zpět", "Zurück"), "", back)
+    }
     private fun openCommunitySettings() {
-        screen(translated("Settings", "Nastavení", "Einstellungen"))
-        action("← " + translated("Home", "Domů", "Startseite")) { home() }
-        text(translated("LANGUAGE", "JAZYK", "SPRACHE"))
-        listOf(
-            "auto" to translated("Automatic (phone language)", "Automaticky (jazyk telefonu)", "Automatisch (Gerätesprache)"),
-            "en" to "English", "cs" to "Čeština", "de" to "Deutsch"
-        ).forEach { (key, name) ->
-            action((if (language() == key) "✓  " else "   ") + name) {
+        scrollSettings(translated("Settings", "Nastavení", "Einstellungen")) { home() }
+        settingsSection(translated("PERSONALIZATION", "PŘIZPŮSOBENÍ", "PERSONALISIERUNG"))
+        settingsItem("🌐", translated("Language", "Jazyk", "Sprache"),
+            when(language()) { "cs" -> "Čeština"; "de" -> "Deutsch"; "auto" -> translated("System default", "Podle telefonu", "Systemsprache"); else -> "English" }) { openLanguageSettings() }
+        settingsItem("◐", translated("Appearance", "Vzhled", "Darstellung"),
+            translated("Dark theme and display", "Tmavý motiv a zobrazení", "Dunkles Design und Anzeige")) { openAppearanceSettings() }
+        settingsSection(translated("FILE MANAGEMENT", "SPRÁVA SOUBORŮ", "DATEIVERWALTUNG"))
+        settingsItem("▦", translated("File browsing", "Procházení souborů", "Dateiansicht"),
+            translated("Open storage and folders", "Úložiště a složky", "Speicher und Ordner")) { openFileSettings() }
+        settingsItem("▰", translated("Storage", "Úložiště", "Speicher"),
+            translated("Usage and available space", "Využití a volné místo", "Belegung und freier Platz")) { openStorageSettings() }
+        settingsItem("⌁", translated("Network", "Síť", "Netzwerk"),
+            translated("Windows shares (SMB)", "Sdílené složky Windows (SMB)", "Windows-Freigaben (SMB)")) { smbConnections() }
+        settingsItem("▣", translated("ZIP manager", "Správce ZIP", "ZIP-Verwaltung"),
+            translated("Create and extract archives", "Vytváření a rozbalování archivů", "Archive erstellen und entpacken")) { openZipManager() }
+        settingsSection(translated("ABOUT & SUPPORT", "INFORMACE A PODPORA", "INFO & UNTERSTÜTZUNG"))
+        settingsItem("♥", translated("Support development", "Podpořit vývoj", "Entwicklung unterstützen"),
+            "Ko-fi  •  Solana (SOL)") { showDonate() }
+        settingsItem("ⓘ", translated("About the app", "O aplikaci", "Über die App"),
+            "File Explorer Community • 3.9") { openAboutSettings() }
+    }
+    private fun openLanguageSettings() {
+        scrollSettings(translated("Language", "Jazyk", "Sprache")) { openCommunitySettings() }
+        settingsSection(translated("SELECT LANGUAGE", "VÝBĚR JAZYKA", "SPRACHE WÄHLEN"))
+        listOf("auto" to translated("Automatic (phone language)", "Automaticky (jazyk telefonu)", "Automatisch (Gerätesprache)"),
+            "en" to "English", "cs" to "Čeština", "de" to "Deutsch").forEach { (key, name) ->
+            settingsItem(if (language() == key) "✓" else "○", name,
+                if (language() == key) translated("Selected", "Vybráno", "Ausgewählt") else "") {
                 getSharedPreferences("community", MODE_PRIVATE).edit().putString("language", key).apply()
-                openCommunitySettings()
+                openLanguageSettings()
             }
         }
-        text(translated("ABOUT & SUPPORT", "O APLIKACI A PODPORA", "ÜBER & UNTERSTÜTZUNG"))
-        text("File Explorer Community • 3.5")
-        action("♥  " + translated("Support the developer", "Podpořit vývojáře", "Entwickler unterstützen")) { showDonate() }
+    }
+    private fun openAppearanceSettings() {
+        scrollSettings(translated("Appearance", "Vzhled", "Darstellung")) { openCommunitySettings() }
+        settingsSection(translated("THEME", "MOTIV", "DESIGN"))
+        settingsItem("◐", translated("Solana Dark", "Solana – tmavý", "Solana Dunkel"),
+            translated("Active theme", "Aktivní motiv", "Aktives Design")) { }
+        text(translated("The dark Solana theme is currently the app's default design.",
+            "Tmavý motiv Solana je aktuálně výchozí vzhled aplikace.",
+            "Das dunkle Solana-Design ist derzeit die Standarddarstellung."), 13)
+        settingsSection(translated("PHOTO GALLERY", "GALERIE FOTEK", "FOTOGALERIE"))
+        settingsItem("▦", translated("Photo layout", "Rozložení fotek", "Fotoansicht"),
+            translated("Choose thumbnail size", "Zvolit velikost náhledů", "Vorschaugröße wählen")) {
+            val options = arrayOf(translated("Large thumbnails", "Velké náhledy", "Große Vorschau"),
+                translated("Small thumbnails", "Malé náhledy", "Kleine Vorschau"))
+            AlertDialog.Builder(this).setTitle(translated("Photo layout", "Rozložení fotek", "Fotoansicht"))
+                .setSingleChoiceItems(options, if (photoLayout() == "large") 0 else 1) { dialog, index ->
+                    getSharedPreferences("explorer", MODE_PRIVATE).edit().putString("photo_layout", if (index == 0) "large" else "small").apply()
+                    dialog.dismiss(); openAppearanceSettings()
+                }.setNegativeButton(translated("Cancel", "Zrušit", "Abbrechen"), null).show()
+        }
+    }
+    private fun openFileSettings() {
+        scrollSettings(translated("File browsing", "Procházení souborů", "Dateiansicht")) { openCommunitySettings() }
+        settingsSection(translated("LOCATIONS", "UMÍSTĚNÍ", "SPEICHERORTE"))
+        settingsItem("▤", translated("Browse phone", "Procházet telefon", "Telefon durchsuchen"),
+            translated("Internal storage", "Interní úložiště", "Interner Speicher")) { openPhone() }
+        settingsItem("▧", translated("Choose a folder", "Vybrat složku", "Ordner auswählen"),
+            translated("Grant access to a folder", "Povolit přístup ke složce", "Ordnerzugriff erlauben")) { pickTree() }
+    }
+    private fun openStorageSettings() {
+        scrollSettings(translated("Storage", "Úložiště", "Speicher")) { openCommunitySettings() }
+        val storage = Environment.getExternalStorageDirectory()
+        val total = storage.totalSpace.coerceAtLeast(1L)
+        val used = (total - storage.freeSpace).coerceAtLeast(0L)
+        val gb = 1024.0 * 1024 * 1024
+        settingsSection(translated("INTERNAL STORAGE", "INTERNÍ ÚLOŽIŠTĚ", "INTERNER SPEICHER"))
+        text(String.format(Locale.US, "%.1f GB / %.1f GB", used / gb, total / gb), 20)
+        root.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; progress = ((used * 100) / total).toInt()
+            progressTintList = android.content.res.ColorStateList.valueOf(accent)
+        }, LinearLayout.LayoutParams(-1, dp(9)))
+        text(String.format(Locale.US, "%.1f GB %s", (total - used) / gb,
+            translated("available", "volných", "frei")))
+        settingsItem("▤", translated("Open storage", "Otevřít úložiště", "Speicher öffnen"), "") { openPhone() }
+    }
+    private fun openAboutSettings() {
+        scrollSettings(translated("About the app", "O aplikaci", "Über die App")) { openCommunitySettings() }
+        settingsSection("FILE EXPLORER COMMUNITY")
+        text("Version 3.9 • Solana Style", 18)
+        text(translated("Free Android file manager without ads.", "Bezplatný správce souborů pro Android bez reklam.",
+            "Kostenloser Android-Dateimanager ohne Werbung."))
     }
     private fun showDonate() {
         screen(translated("Support development", "Podpořit vývoj", "Entwicklung unterstützen"))
@@ -276,20 +384,206 @@ class MainActivity : Activity() {
         }
         home()
     }
-    private val bg = Color.rgb(15, 20, 30)
-    private val panel = Color.rgb(29, 38, 53)
+    private val bg = Color.rgb(5, 9, 17)
+    private val panel = Color.rgb(18, 24, 40)
     private val ink = Color.rgb(238, 244, 252)
     private val muted = Color.rgb(159, 174, 196)
-    private val accent = Color.rgb(123, 180, 255)
+    private val accent = Color.rgb(32, 235, 211)
+    private val solPurple = Color.rgb(166, 63, 243)
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, radius: Int = 15) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(radius).toFloat()
     }
+    private fun solGradient(radius: Int = 18) = GradientDrawable(
+        GradientDrawable.Orientation.LEFT_RIGHT,
+        intArrayOf(Color.rgb(7, 104, 113), Color.rgb(81, 32, 129), Color.rgb(155, 25, 173))
+    ).apply { cornerRadius = dp(radius).toFloat(); setStroke(dp(1), accent) }
+    private fun solCard() = GradientDrawable(
+        GradientDrawable.Orientation.TL_BR,
+        intArrayOf(Color.rgb(38, 21, 67), Color.rgb(12, 27, 41))
+    ).apply { cornerRadius = dp(18).toFloat(); setStroke(dp(1), Color.rgb(85, 61, 122)) }
     private fun label(value: String, size: Int = 15, color: Int = ink, bold: Boolean = false) = TextView(this).apply {
         text = value; textSize = size.toFloat(); setTextColor(color)
         if (bold) setTypeface(null, Typeface.BOLD)
         gravity = Gravity.CENTER_VERTICAL
     }
+    // Consistent vector-style pictograms; no device-dependent emoji or Unicode glyphs.
+    private fun pictogram(kind: String, tint: Int, size: Int = 26): View = object : View(this) {
+        private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = tint; style = Paint.Style.STROKE; strokeWidth = 2.3f
+            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val scale = minOf(width, height) / 32f
+            canvas.save(); canvas.translate((width - 32f * scale) / 2, (height - 32f * scale) / 2)
+            canvas.scale(scale, scale)
+            fun line(x: Float, y: Float, xx: Float, yy: Float) = canvas.drawLine(x,y,xx,yy,pen)
+            fun box(x: Float,y: Float,xx: Float,yy: Float,r: Float=3f) = canvas.drawRoundRect(RectF(x,y,xx,yy),r,r,pen)
+            fun path(vararg pts: Float) { val q=Path(); q.moveTo(pts[0],pts[1]); var i=2; while(i<pts.size){q.lineTo(pts[i],pts[i+1]);i+=2}; canvas.drawPath(q,pen) }
+            when(kind) {
+                "photos" -> { box(4f,6f,28f,26f); canvas.drawCircle(22f,12f,2f,pen); path(6f,23f,13f,16f,18f,21f,21f,18f,27f,24f) }
+                "video" -> { box(4f,7f,28f,25f); path(13f,12f,21f,16f,13f,20f,13f,12f) }
+                "audio" -> { line(18f,7f,18f,22f);line(18f,7f,26f,5f);line(26f,5f,26f,20f); canvas.drawOval(RectF(9f,20f,18f,26f),pen);canvas.drawOval(RectF(17f,18f,26f,24f),pen) }
+                "documents" -> { path(8f,4f,20f,4f,26f,10f,26f,28f,8f,28f,8f,4f);path(20f,4f,20f,10f,26f,10f);line(12f,16f,22f,16f);line(12f,21f,22f,21f) }
+                "downloads" -> { line(16f,5f,16f,22f);path(9f,16f,16f,23f,23f,16f);path(6f,24f,6f,28f,26f,28f,26f,24f) }
+                "files" -> {path(3f,10f,3f,26f,29f,26f,29f,12f,16f,12f,12f,8f,3f,8f,3f,10f);line(3f,14f,29f,14f)}
+                "scans" -> {path(5f,12f,5f,6f,11f,6f);path(21f,6f,27f,6f,27f,12f);path(5f,20f,5f,26f,11f,26f);path(21f,26f,27f,26f,27f,20f);line(8f,16f,24f,16f)}
+                "shots" -> {box(5f,5f,27f,27f);box(10f,10f,22f,22f);canvas.drawCircle(17f,15f,1.5f,pen)}
+                "network" -> {canvas.drawCircle(16f,7f,3f,pen);canvas.drawCircle(7f,24f,3f,pen);canvas.drawCircle(25f,24f,3f,pen);line(14f,10f,9f,21f);line(18f,10f,23f,21f);line(10f,24f,22f,24f)}
+                "zip" -> {box(7f,4f,25f,28f);line(16f,7f,16f,20f);box(13f,20f,19f,25f,1f)}
+                "star" -> {path(16f,4f,20f,12f,29f,13f,22f,20f,24f,29f,16f,24f,8f,29f,10f,20f,3f,13f,12f,12f,16f,4f)}
+                "settings" -> {canvas.drawCircle(16f,16f,7f,pen);canvas.drawCircle(16f,16f,2.5f,pen);line(16f,4f,16f,8f);line(16f,24f,16f,28f);line(4f,16f,8f,16f);line(24f,16f,28f,16f)}
+                "folder" -> {path(3f,10f,3f,26f,29f,26f,29f,12f,16f,12f,12f,8f,3f,8f,3f,10f)}
+                else -> { box(6f,6f,26f,26f); line(11f,16f,21f,16f) }
+            }
+            canvas.restore()
+        }
+    }
+    private fun homeMenu(anchor: View) {
+        val popup = PopupWindow(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            background = solCard()
+        }
+        val entries = listOf(
+            Triple("settings", translated("Settings", "Nastavení", "Einstellungen"), { openCommunitySettings() }),
+            Triple("network", translated("Network (SMB)", "Síť (SMB)", "Netzwerk (SMB)"), { smbConnections() }),
+            Triple("folder", translated("Choose a folder", "Vybrat složku", "Ordner auswählen"), { pickTree() }),
+            Triple("zip", translated("ZIP manager", "Správce ZIP", "ZIP-Verwaltung"), { openZipManager() }),
+            Triple("settings", translated("Support development", "Podpořit vývoj", "Entwicklung unterstützen"), { showDonate() }),
+            Triple("documents", translated("About", "O aplikaci", "Über die App"), { openAboutSettings() })
+        )
+        entries.forEachIndexed { i, (symbol, title, task) ->
+            val item = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(12), dp(4), dp(9), dp(4))
+                addView(pictogram(symbol, if (i % 2 == 0) accent else Color.rgb(169, 132, 247)), LinearLayout.LayoutParams(dp(27), dp(27)))
+                addView(label(title, 14, ink, true).apply { setPadding(dp(13), 0, 0, 0) }, LinearLayout.LayoutParams(0, -1, 1f))
+                setOnClickListener { popup.dismiss(); task() }
+            }
+            container.addView(item, LinearLayout.LayoutParams(-1, dp(49)))
+            if (i != entries.lastIndex) container.addView(View(this).apply { setBackgroundColor(Color.rgb(41, 47, 65)) }, LinearLayout.LayoutParams(-1, dp(1)))
+        }
+        popup.contentView = container
+        popup.width = minOf(resources.displayMetrics.widthPixels - dp(38), dp(288))
+        popup.height = -2
+        popup.isFocusable = true
+        popup.isOutsideTouchable = true
+        popup.elevation = dp(14).toFloat()
+        popup.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        popup.showAsDropDown(anchor, 0, dp(4), Gravity.START)
+    }
+
+    private val favoritesPrefs get() = getSharedPreferences("favorite_folders", MODE_PRIVATE)
+    private fun favoritePaths(): List<String> = favoritesPrefs.getString("paths", "")!!
+        .split("\n").filter { it.isNotBlank() && File(it).isDirectory }
+    private fun setFavorite(file: File) {
+        val paths = favoritePaths().toMutableList()
+        if (file.absolutePath in paths) paths.remove(file.absolutePath) else paths.add(file.absolutePath)
+        favoritesPrefs.edit().putString("paths", paths.joinToString("\n")).apply()
+        message(if (file.absolutePath in paths) translated("Added to favorites", "Přidáno do oblíbených", "Zu Favoriten hinzugefügt") else translated("Removed from favorites", "Odebráno z oblíbených", "Aus Favoriten entfernt"))
+    }
+    private fun showFavoriteFolders() {
+        scrollSettings(translated("Favorite folders", "Oblíbené složky", "Favoriten")) { home() }
+        val paths = favoritePaths()
+        if (paths.isEmpty()) text(translated("Open any folder in All files and use the star to add it here.", "Otevři složku v Všechny soubory a pomocí hvězdičky ji přidej sem.", "Ordner öffnen und mit Stern markieren."))
+        paths.forEach { path ->
+            val folder = File(path)
+            settingsItem("★", folder.name.ifEmpty { path }, path) { phoneDir = folder; openPhone() }
+        }
+    }
+
+    private val zipSelectRequest = 7301
+    private val zipSaveRequest = 7302
+    private val zipOpenRequest = 7303
+    private val zipDestinationRequest = 7304
+    private var zipSelectedUris: List<Uri> = emptyList()
+    private var zipArchiveUri: Uri? = null
+    private fun openZipManager() {
+        scrollSettings(translated("ZIP manager", "Správce ZIP", "ZIP-Verwaltung")) { openCommunitySettings() }
+        settingsSection(translated("ARCHIVES", "ARCHIVY", "ARCHIVE"))
+        settingsItem("+", translated("Create ZIP", "Vytvořit ZIP", "ZIP erstellen"), translated("Choose files to compress", "Vyber soubory ke kompresi", "Dateien auswählen")) {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            }, zipSelectRequest)
+        }
+        settingsItem("↧", translated("Extract ZIP", "Rozbalit ZIP", "ZIP entpacken"), translated("Choose archive and destination", "Vyber archiv a cílovou složku", "Archiv und Zielordner wählen")) {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                type = "application/zip"; addCategory(Intent.CATEGORY_OPENABLE)
+            }, zipOpenRequest)
+        }
+        text(translated("ZIP files are processed locally on your phone.", "ZIP soubory se zpracovávají přímo v telefonu.", "ZIP-Dateien werden lokal verarbeitet."), 13)
+    }
+    private fun createZip(target: Uri, sources: List<Uri>) {
+        io.execute {
+            try {
+                contentResolver.openOutputStream(target, "w")!!.use { out ->
+                    ZipOutputStream(out).use { zip ->
+                        val used = mutableSetOf<String>()
+                        sources.forEachIndexed { index, uri ->
+                            val original = queryDisplayName(uri)?.takeIf { it.isNotBlank() } ?: "file_${index+1}"
+                            val safe = original.replace('/', '_').replace('\\', '_')
+                            var name = safe; var suffix = 2
+                            while (!used.add(name)) { name = "${safe.substringBeforeLast('.', safe)}_${suffix++}" + if ('.' in safe) ".${safe.substringAfterLast('.')}" else "" }
+                            zip.putNextEntry(ZipEntry(name))
+                            contentResolver.openInputStream(uri)!!.use { it.copyTo(zip) }
+                            zip.closeEntry()
+                        }
+                    }
+                }
+                runOnUiThread { message(translated("ZIP created", "ZIP vytvořen", "ZIP erstellt")); openZipManager() }
+            } catch (e: Exception) { runOnUiThread { message("ZIP: ${e.message}") } }
+        }
+    }
+    private fun extractZip(source: Uri, tree: Uri) {
+        io.execute {
+            try {
+                val base = DocumentFile.fromTreeUri(this, tree) ?: error("Folder not available")
+                var count = 0
+                contentResolver.openInputStream(source)!!.use { input ->
+                    ZipInputStream(input).use { zip ->
+                        while (true) {
+                            val entry = zip.nextEntry ?: break
+                            val parts = entry.name.replace('\\', '/').split('/').filter { it.isNotBlank() }
+                            // Prevent traversal, absolute paths and unsafe ZIP entries.
+                            if (parts.isEmpty() || parts.any { it == ".." || it == "." || ':' in it }) { zip.closeEntry(); continue }
+                            if (++count > 10000) error("Too many ZIP entries")
+                            var folder = base
+                            parts.dropLast(1).forEach { segment ->
+                                folder = folder.findFile(segment)?.takeIf { it.isDirectory } ?: folder.createDirectory(segment) ?: error("Cannot create directory")
+                            }
+                            if (entry.isDirectory) {
+                                val last = parts.last()
+                                if (folder.findFile(last) == null) folder.createDirectory(last) ?: error("Cannot create directory")
+                            } else {
+                                val filename = parts.last()
+                                if (folder.findFile(filename) != null) error("File already exists: $filename")
+                                val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(filename.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+                                val file = folder.createFile(mime, filename) ?: error("Cannot create $filename")
+                                contentResolver.openOutputStream(file.uri, "w")!!.use { output ->
+                                    val buffer = ByteArray(8192)
+                                    var written = 0L
+                                    while (true) {
+                                        val n = zip.read(buffer)
+                                        if (n < 0) break
+                                        written += n
+                                        if (written > 2L * 1024 * 1024 * 1024) error("ZIP entry too large")
+                                        output.write(buffer, 0, n)
+                                    }
+                                }
+                            }
+                            zip.closeEntry()
+                        }
+                    }
+                }
+                runOnUiThread { message(translated("ZIP extracted", "ZIP rozbalen", "ZIP entpackt")); openZipManager() }
+            } catch (e: Exception) { runOnUiThread { message("ZIP: ${e.message}") } }
+        }
+    }
+
     private fun screen(title: String) {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -306,7 +600,14 @@ class MainActivity : Activity() {
             root.requestApplyInsets()
         }
         val heading = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        heading.addView(label("▣", 26, accent, true), LinearLayout.LayoutParams(dp(42), dp(56)))
+        val logo = label("≋", 32, accent, true).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            if (title == "File Explorer") {
+                contentDescription = translated("Open menu", "Otevřít nabídku", "Menü öffnen")
+                setOnClickListener { homeMenu(this) }
+            }
+        }
+        heading.addView(logo, LinearLayout.LayoutParams(dp(42), dp(56)))
         heading.addView(label(title.removePrefix("📁 ").removePrefix("📱 ").removePrefix("🖥️ "), 25, ink, true), LinearLayout.LayoutParams(0, dp(56), 1f))
         root.addView(heading)
     }
@@ -317,7 +618,7 @@ class MainActivity : Activity() {
         val item = label(title, 15, ink, true).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(17), 0, dp(12), 0)
-            background = shape(panel)
+            background = solCard()
             setOnClickListener { click() }
         }
         root.addView(item, LinearLayout.LayoutParams(-1, dp(51)).apply { bottomMargin = dp(8) })
@@ -327,7 +628,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = shape(panel, 18)
+            background = solCard()
             setOnClickListener { click() }
         }
         val iconView = TextView(this).apply {
@@ -411,57 +712,141 @@ class MainActivity : Activity() {
             .setNegativeButton("Ne", null).show()
     }
     private fun home() {
-        mode = "home"; selectionMode = false; selectedFiles.clear(); screen("File Explorer Community")
-        // Hlavička zůstává nahoře, všechny položky úvodní nabídky lze posouvat.
-        val screenRoot = root
-        val homeScroll = ScrollView(this).apply {
-            isFillViewport = true
-            clipToPadding = false
-        }
-        val homeContent = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        homeScroll.addView(homeContent, LinearLayout.LayoutParams(-1, -2))
-        screenRoot.addView(homeScroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root = homeContent
+        mode = "home"; selectionMode = false; selectedFiles.clear()
+        screen("File Explorer")
+        val fixedRoot = root
+        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(content)
+        fixedRoot.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        root = content
+
         val search = EditText(this).apply {
-            setSingleLine(true); hint = "⌕  " + translated("Search your phone...", "Hledat v telefonu...", "Telefon durchsuchen...")
+            setSingleLine(true)
+            hint = "⌕  " + translated("Search your phone...", "Hledat v telefonu...", "Telefon durchsuchen...")
             textSize = 15f; setTextColor(ink); setHintTextColor(muted)
-            background = shape(panel)
-            setPadding(dp(16), 0, dp(16), 0)
+            background = solCard(); setPadding(dp(18), 0, dp(18), 0)
+            setOnEditorActionListener { _, _, _ ->
+                val query = text.toString().trim()
+                if (query.isNotEmpty()) searchPhone(query)
+                true
+            }
         }
-        root.addView(search, LinearLayout.LayoutParams(-1, dp(52)).apply { bottomMargin = dp(20) })
-        search.setOnEditorActionListener { _, _, _ ->
-            val query = search.text.toString().trim()
-            if (query.isNotEmpty()) searchPhone(query)
-            true
+        root.addView(search, LinearLayout.LayoutParams(-1, dp(52)).apply { bottomMargin = dp(16) })
+
+        val storage = Environment.getExternalStorageDirectory()
+        val total = storage.totalSpace.coerceAtLeast(1L)
+        val used = (total - storage.freeSpace).coerceAtLeast(0L)
+        val gb = 1024.0 * 1024 * 1024
+        val storageCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = solCard(); setOnClickListener { openPhone() }
         }
-        action("🖼️   " + translated("All photos", "Všechny fotografie", "Alle Fotos") + "    ›") { showAllPhotos() }
-        action("📄   " + translated("Document scanner", "Skener dokumentů", "Dokumentenscanner") + "    ›") { startDocumentScanner() }
-        text(translated("QUICK ACCESS", "RYCHLÝ PŘÍSTUP", "SCHNELLZUGRIFF"), 13)
-        val tiles = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf(Triple("🖼️", translated("Pictures", "Obrázky", "Bilder"), "Pictures"), Triple("🎬", translated("Videos", "Videa", "Videos"), "Movies"),
-            Triple("🎵", translated("Music", "Hudba", "Musik"), "Music"), Triple("📄", translated("Documents", "Dokumenty", "Dokumente"), "Documents")).forEach { (symbol, name, path) ->
-            tiles.addView(quickTile(symbol, name) { when (path) {
-                "Pictures" -> showAllPhotos()
-                "Movies" -> showMediaGallery("video")
-                "Music" -> showMediaGallery("audio")
-                else -> showMediaGallery("documents")
-            } }, LinearLayout.LayoutParams(0, dp(94), 1f).apply { marginEnd = dp(6) })
+        storageCard.addView(label("▣  " + translated("Internal storage", "Interní úložiště", "Interner Speicher") + "   ›", 18, ink, true))
+        storageCard.addView(label(String.format(Locale.US, "%.1f GB / %.1f GB", used / gb, total / gb), 13, muted))
+        storageCard.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; progress = ((used * 100) / total).toInt()
+            progressTintList = android.content.res.ColorStateList.valueOf(accent)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(49, 53, 74))
+        }, LinearLayout.LayoutParams(-1, dp(8)).apply { topMargin = dp(12) })
+        root.addView(storageCard, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
+
+        text(translated("YOUR FILES", "VAŠE SOUBORY", "DEINE DATEIEN"), 12)
+        val categories = listOf(
+            Triple("photos", translated("Photos", "Fotky", "Fotos"), "photos"),
+            Triple("video", translated("Videos", "Videa", "Videos"), "video"),
+            Triple("audio", translated("Music", "Hudba", "Musik"), "audio"),
+            Triple("documents", translated("Documents", "Dokumenty", "Dokumente"), "documents"),
+            Triple("downloads", translated("Downloads", "Stažené", "Downloads"), "downloads"),
+            Triple("files", translated("All files", "Všechny soubory", "Alle Dateien"), "files")
+        )
+        val tileColors = listOf(
+            Color.rgb(176, 125, 255), Color.rgb(250, 120, 151), Color.rgb(52, 220, 196),
+            Color.rgb(100, 160, 255), Color.rgb(250, 189, 91), Color.rgb(170, 140, 255)
+        )
+        categories.chunked(2).forEachIndexed { rowIndex, group ->
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            group.forEachIndexed { colIndex, (kind, name, target) ->
+                val tint = tileColors[rowIndex * 2 + colIndex]
+                val tile = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    background = shape(Color.rgb(18, 24, 40), 17)
+                    setPadding(dp(12), dp(9), dp(8), dp(9))
+                    val iconHolder = android.widget.FrameLayout(this@MainActivity).apply {
+                        background = shape(Color.argb(37, Color.red(tint), Color.green(tint), Color.blue(tint)), 13)
+                        addView(pictogram(kind, tint), android.widget.FrameLayout.LayoutParams(dp(31),dp(31),Gravity.CENTER))
+                    }
+                    addView(iconHolder, LinearLayout.LayoutParams(dp(47),dp(47)))
+                    addView(label(name, 14, ink, true).apply {
+                        setPadding(dp(10),0,0,0); maxLines=2
+                    }, LinearLayout.LayoutParams(0,-2,1f))
+                    setOnClickListener {
+                        when (target) {
+                            "photos" -> showAllPhotos()
+                            "video", "audio", "documents" -> showMediaGallery(target)
+                            "downloads" -> showCategory("Download")
+                            else -> openPhone()
+                        }
+                    }
+                }
+                line.addView(tile, LinearLayout.LayoutParams(0,dp(72),1f).apply { if(colIndex==0) marginEnd=dp(9) })
+            }
+            root.addView(line, LinearLayout.LayoutParams(-1,-2).apply { bottomMargin=dp(9) })
         }
-        root.addView(tiles, LinearLayout.LayoutParams(-1, dp(94)).apply { bottomMargin = dp(18) })
-        text(translated("STORAGE", "ÚLOŽIŠTĚ", "SPEICHER"), 13)
-        action("📱   " + translated("Internal storage", "Interní paměť telefonu", "Interner Speicher") + "    ›") { openPhone() }
-        action("⬇️   " + translated("Downloads", "Stažené soubory", "Downloads") + "    ›") { showCategory("Download") }
-        action("📸   " + translated("Screenshots", "Screenshoty", "Screenshots") + "    ›") { showScreenshots() }
-        action("📂   " + translated("My scans", "Moje skeny", "Meine Scans") + "    ›") { showScans() }
-        text(translated("MORE OPTIONS", "DALŠÍ MOŽNOSTI", "WEITERE OPTIONEN"), 13)
-        action("📂   " + translated("Choose a folder", "Vybrat konkrétní složku", "Ordner auswählen")) { pickTree() }
-        action("🖥️   " + translated("Network / Windows (SMB)", "Síť / Windows (SMB)", "Netzwerk / Windows (SMB)")) { smbConnections() }
-        if (share != null) action(translated("↩   Connected drive $shareName", "↩   Připojený disk $shareName", "↩   Connected drive $shareName")) { showRemote() }
-        action("⚙  " + translated("Settings", "Nastavení", "Einstellungen")) { openCommunitySettings() }
-        text("File Explorer Community • Free, no ads", 12)
-        // Další obrazovky volají screen(), které root znovu nastaví.
+        text(translated("QUICK ACCESS", "RYCHLÝ PŘÍSTUP", "SCHNELLZUGRIFF"), 12)
+        val shortcuts = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf(
+            Triple("scans", translated("My scans", "Moje skeny", "Meine Scans"), "scans"),
+            Triple("shots", translated("Screenshots", "Snímky obrazovky", "Screenshots"), "shots")
+        ).forEachIndexed { index, (kind, title, target) ->
+            val tile = LinearLayout(this).apply {
+                orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL
+                background=shape(panel,16); setPadding(dp(13),0,dp(8),0)
+                addView(pictogram(kind,accent),LinearLayout.LayoutParams(dp(30),dp(30)))
+                addView(label(title,13,ink,true).apply {setPadding(dp(10),0,0,0)},LinearLayout.LayoutParams(0,-2,1f))
+                setOnClickListener { if(target=="scans") showScans() else showScreenshots() }
+            }
+            shortcuts.addView(tile,LinearLayout.LayoutParams(0,dp(60),1f).apply {if(index==0) marginEnd=dp(9)})
+        }
+        root.addView(shortcuts,LinearLayout.LayoutParams(-1,-2).apply {bottomMargin=dp(13)})
+        val fav = LinearLayout(this).apply {
+            orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL
+            background=shape(panel,16); setPadding(dp(15),0,dp(12),0)
+            addView(pictogram("star",Color.rgb(245,190,82)),LinearLayout.LayoutParams(dp(30),dp(30)))
+            addView(label(translated("Favorites", "Oblíbené složky", "Favoriten"),14,ink,true).apply {setPadding(dp(12),0,0,0)},LinearLayout.LayoutParams(0,-2,1f))
+            addView(label("›",23,muted))
+            setOnClickListener { showFavoriteFolders() }
+        }
+        root.addView(fav, LinearLayout.LayoutParams(-1,dp(60)).apply {bottomMargin=dp(13)})
+        text(translated("TOOLS", "NÁSTROJE", "WERKZEUGE"),12)
+        val scanner = LinearLayout(this).apply {
+            orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL
+            background=shape(panel,16);setPadding(dp(16),0,dp(14),0)
+            addView(pictogram("scans",Color.rgb(160,124,249)),LinearLayout.LayoutParams(dp(30),dp(30)))
+            addView(label(translated("Scan a document", "Skenovat dokument", "Dokument scannen"),15,ink,true).apply {setPadding(dp(12),0,0,0)},LinearLayout.LayoutParams(0,-2,1f))
+            addView(label("›",23,muted).apply {gravity=Gravity.RIGHT},LinearLayout.LayoutParams(0,-2,1f))
+            setOnClickListener { startDocumentScanner() }
+        }
+        root.addView(scanner,LinearLayout.LayoutParams(-1,dp(59)).apply {bottomMargin=dp(10)})
+        val network = LinearLayout(this).apply {
+            orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL
+            background=shape(panel,16);setPadding(dp(16),0,dp(14),0)
+            addView(pictogram("network",accent),LinearLayout.LayoutParams(dp(30),dp(30)))
+            addView(label(translated("Network / Windows (SMB)","Síť / Windows (SMB)","Netzwerk / Windows (SMB)"),14,ink,true).apply {setPadding(dp(12),0,0,0)},LinearLayout.LayoutParams(0,-2,1f))
+            addView(label("›",23,muted).apply {gravity=Gravity.RIGHT},LinearLayout.LayoutParams(0,-2,1f))
+            setOnClickListener { smbConnections() }
+        }
+        root.addView(network,LinearLayout.LayoutParams(-1,dp(59)).apply {bottomMargin=dp(10)})
+        if(share!=null) settingsItem("↩",shareName,"SMB") {showRemote()}
+        val settingsRow = LinearLayout(this).apply {
+            orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL
+            setPadding(dp(16),0,dp(14),0);background=shape(panel,16)
+            addView(pictogram("settings",muted),LinearLayout.LayoutParams(dp(28),dp(28)))
+            addView(label(translated("Settings", "Nastavení", "Einstellungen"),14,ink,true).apply {setPadding(dp(12),0,0,0)},LinearLayout.LayoutParams(0,-2,1f))
+            setOnClickListener {openCommunitySettings()}
+        }
+        root.addView(settingsRow,LinearLayout.LayoutParams(-1,dp(54)).apply {bottomMargin=dp(14)})
+        root = fixedRoot
     }
 
     // Fotografie se filtrují podle času pořízení, nikoliv podle názvu složky.
@@ -883,6 +1268,17 @@ class MainActivity : Activity() {
         }.show()
     }
 
+    private var documentFilter = "all"
+    private fun documentMatches(name: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        return when (documentFilter) {
+            "pdf" -> ext == "pdf"
+            "word" -> ext in setOf("doc", "docx", "odt")
+            "excel" -> ext in setOf("xls", "xlsx", "csv", "ods")
+            "txt" -> ext in setOf("txt", "rtf")
+            else -> true
+        }
+    }
     private fun showMediaGallery(kind: String) {
         mediaScreen = kind
         mode = "media_$kind"
@@ -900,7 +1296,25 @@ class MainActivity : Activity() {
             action(translated("Allow access", "Povolit přístup", "Allow access")) { requestPermissions(arrayOf(permission), 202) }
             return
         }
-        mediaItems = loadMedia(kind)
+        if (kind == "documents") {
+            val filters = listOf("all", "pdf", "word", "excel", "txt")
+            val labels = listOf(
+                translated("All", "Vše", "Alle"), "PDF", "Word", "Excel", "TXT"
+            )
+            val bar = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+            val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            filters.forEachIndexed { index, filter ->
+                val chip = label(labels[index], 14, ink, filter == documentFilter).apply {
+                    gravity = Gravity.CENTER; setPadding(dp(16), 0, dp(16), 0)
+                    background = if (filter == documentFilter) solGradient(24) else shape(panel, 24)
+                    setOnClickListener { documentFilter = filter; showMediaGallery("documents") }
+                }
+                buttons.addView(chip, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(8) })
+            }
+            bar.addView(buttons)
+            root.addView(bar, LinearLayout.LayoutParams(-1, dp(48)))
+        }
+        mediaItems = loadMedia(kind).let { items -> if (kind == "documents") items.filter { documentMatches(it.name) } else items }
         selectedMedia.retainAll(mediaItems.map { it.uri }.toSet())
         text(translated("${mediaItems.size} files • newest first", "${mediaItems.size} souborů • nejnovější nahoře", "${mediaItems.size} files • newest first"), 13)
         if (mediaItems.isEmpty()) {
@@ -1087,12 +1501,13 @@ class MainActivity : Activity() {
             translated("＋ Folder", "＋ Složka", "＋ Folder") to { ask(translated("New folder name", "Název nové složky", "New folder name")) { name ->
                 if (!safeName(name) || !File(dir, name).mkdir()) message(translated("Cannot create folder", "Složku nelze vytvořit", "Cannot create folder")) else showPhone()
             } },
-            translated("⋮ More", "⋮ Více", "⋮ More") to { AlertDialog.Builder(this).setItems(arrayOf(translated("Add file", "Přidat soubor", "Add file"), translated("Refresh", "Obnovit", "Refresh"), translated("Select files", "Označit soubory", "Select files"), translated("Select all in this folder", "Vybrat vše v této složce", "Select all in this folder"))) { _, i ->
+            translated("⋮ More", "⋮ Více", "⋮ More") to { AlertDialog.Builder(this).setItems(arrayOf(translated("Add file", "Přidat soubor", "Add file"), translated("Refresh", "Obnovit", "Refresh"), translated("Select files", "Označit soubory", "Select files"), translated("Select all in this folder", "Vybrat vše v této složce", "Select all in this folder"), translated("★ Add/remove current folder from favorites", "★ Přidat/odebrat složku z oblíbených", "★ Ordner als Favorit"))) { _, i ->
                 when(i) {
                     0 -> { pendingPhoneDir = dir; pendingUploadLocal = false; chooseFile() }
                     1 -> showPhone()
                     2 -> { selectionMode = true; selectedFiles.clear(); showPhone() }
                     3 -> { selectionMode = true; selectedFiles.clear(); selectedFiles.addAll(dir.listFiles() ?: emptyArray()); showPhone() }
+                    4 -> { setFavorite(dir); showPhone() }
                 }
             }.show() }
         )
@@ -1204,7 +1619,7 @@ class MainActivity : Activity() {
     }
     private fun safeName(name: String) = name.isNotBlank() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
     private fun phoneMenu(file: File) {
-        val actions = arrayOf(translated("Open", "Otevřít", "Open"), translated("Copy", "Kopírovat", "Copy"), translated("Cut", "Vyjmout", "Ausschneiden"), translated("Select multiple", "Označit více", "Select multiple"), translated("Rename", "Přejmenovat", "Rename"), translated("Delete", "Smazat", "Löschen"), translated("Copy to Windows", "Kopírovat do Windows", "Copy to Windows"))
+        val actions = arrayOf(translated("Open", "Otevřít", "Open"), translated("Copy", "Kopírovat", "Copy"), translated("Cut", "Vyjmout", "Ausschneiden"), translated("Select multiple", "Označit více", "Select multiple"), translated("Rename", "Přejmenovat", "Rename"), translated("Delete", "Smazat", "Löschen"), translated("Copy to Windows", "Kopírovat do Windows", "Copy to Windows"), translated("★ Favorite folder", "★ Oblíbená složka", "★ Favoritenordner"))
         AlertDialog.Builder(this).setTitle(file.name).setItems(actions) { _, index ->
             when (index) {
                 0 -> try {
@@ -1223,6 +1638,7 @@ class MainActivity : Activity() {
                     showPhone()
                 }
                 5 -> confirm("Opravdu smazat ${file.name}?") { if (!deleteTree(file)) message("Soubor nelze smazat"); showPhone() }
+                7 -> setFavorite(if (file.isDirectory) file else file.parentFile ?: phoneDir)
                 6 -> if (share == null) message(translated("Connect to Windows first", "Nejdřív se připoj k Windows", "Connect to Windows first")) else
                     ask(translated("SMB destination subfolder (for root enter \\\\)", "Cílová podsložka SMB (pro kořen napiš \\)", "SMB destination subfolder (for root enter \\\\)"), smbPath) { path ->
                         io.execute { try {
@@ -1246,6 +1662,38 @@ class MainActivity : Activity() {
     @Deprecated("Activity result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == zipSelectRequest) {
+            if (resultCode == RESULT_OK && data != null) {
+                val uris = mutableListOf<Uri>()
+                data.data?.let { uris.add(it) }
+                data.clipData?.let { clips -> for (i in 0 until clips.itemCount) uris.add(clips.getItemAt(i).uri) }
+                zipSelectedUris = uris.distinct()
+                if (zipSelectedUris.isNotEmpty()) startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    type = "application/zip"; addCategory(Intent.CATEGORY_OPENABLE)
+                    putExtra(Intent.EXTRA_TITLE, "Archive.zip")
+                }, zipSaveRequest)
+            }
+            return
+        }
+        if (requestCode == zipSaveRequest) {
+            if (resultCode == RESULT_OK && data?.data != null && zipSelectedUris.isNotEmpty()) createZip(data.data!!, zipSelectedUris)
+            zipSelectedUris = emptyList()
+            return
+        }
+        if (requestCode == zipOpenRequest) {
+            if (resultCode == RESULT_OK && data?.data != null) {
+                zipArchiveUri = data.data
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                }, zipDestinationRequest)
+            }
+            return
+        }
+        if (requestCode == zipDestinationRequest) {
+            val source = zipArchiveUri; zipArchiveUri = null
+            if (resultCode == RESULT_OK && source != null && data?.data != null) extractZip(source, data.data!!)
+            return
+        }
         if (requestCode == scannerRequest) {
             if (resultCode == RESULT_OK) {
                 val result = GmsDocumentScanningResult.fromActivityResultIntent(data)
@@ -1262,6 +1710,25 @@ class MainActivity : Activity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
                 catch (_: Exception) { }
                 saveScannedFiles(pendingScanName, target)
+            }
+            return
+        }
+        if (requestCode == scanCopyFolderRequest) {
+            val pending = pendingScanCopy
+            pendingScanCopy = null
+            if (resultCode == RESULT_OK && data?.data != null && pending != null) {
+                val folderUri = data.data!!
+                io.execute {
+                    try {
+                        val folder = DocumentFile.fromTreeUri(this, folderUri) ?: error("Folder unavailable")
+                        val mime = scanMime(pending.second)
+                        val target = folder.createFile(mime, pending.second) ?: error("Cannot create file")
+                        contentResolver.openInputStream(pending.first)!!.use { input ->
+                            contentResolver.openOutputStream(target.uri, "w")!!.use { output -> input.copyTo(output) }
+                        }
+                        runOnUiThread { message(translated("Copy created", "Kopie vytvořena", "Kopie erstellt")); showScans() }
+                    } catch (e: Exception) { runOnUiThread { message(translated("Copy failed: ${e.message}", "Kopírování selhalo: ${e.message}", "Kopieren fehlgeschlagen: ${e.message}")) } }
+                }
             }
             return
         }
@@ -1751,6 +2218,80 @@ class MainActivity : Activity() {
         return found
     }
 
+    private fun scanMime(name: String): String = if (name.endsWith(".pdf", true)) "application/pdf" else "image/jpeg"
+
+    private fun openScan(uri: Uri, name: String, edit: Boolean = false) {
+        val intent = Intent(if (edit) Intent.ACTION_EDIT else Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, scanMime(name))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (edit) addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            clipData = android.content.ClipData.newUri(contentResolver, name, uri)
+        }
+        try {
+            startActivity(Intent.createChooser(intent, translated(
+                if (edit) "Edit with…" else "Open with…",
+                if (edit) "Upravit pomocí…" else "Otevřít pomocí…",
+                if (edit) "Bearbeiten mit…" else "Öffnen mit…")))
+        } catch (_: Exception) { message(translated("No compatible application installed", "Není nainstalovaná vhodná aplikace", "Keine passende App installiert")) }
+    }
+
+    private fun scanActions(uri: Uri, name: String) {
+        val options = arrayOf(
+            translated("Open", "Otevřít", "Öffnen"),
+            translated("Open with…", "Otevřít v jiné aplikaci…", "Öffnen mit…"),
+            translated("Edit with…", "Upravit v aplikaci…", "Bearbeiten mit…"),
+            translated("Share / Send", "Sdílet / Odeslat", "Teilen / Senden"),
+            translated("Copy to folder…", "Kopírovat do složky…", "In Ordner kopieren…"),
+            translated("Rename", "Přejmenovat", "Umbenennen"),
+            translated("Select / Deselect", "Označit / Zrušit výběr", "Auswählen / Abwählen"),
+            translated("Details", "Podrobnosti", "Details"),
+            translated("Delete", "Smazat", "Löschen"))
+        AlertDialog.Builder(this).setTitle(name).setItems(options) { _, choice ->
+            when (choice) {
+                0, 1 -> openScan(uri, name)
+                2 -> openScan(uri, name, true)
+                3 -> { selectedScans.clear(); selectedScans.add(uri); shareScans() }
+                4 -> {
+                    pendingScanCopy = uri to name
+                    startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    }, scanCopyFolderRequest)
+                }
+                5 -> {
+                    val ext = name.substringAfterLast('.', "")
+                    val base = if (ext.isNotEmpty()) name.dropLast(ext.length + 1) else name
+                    ask(translated("New name", "Nový název", "Neuer Name"), base) { raw ->
+                        val clean = raw.trim().replace(Regex("[/\\\\]"), "_")
+                        val filename = if (ext.isNotEmpty()) "$clean.$ext" else clean
+                        if (clean.isBlank()) { message(translated("Invalid name", "Neplatný název", "Ungültiger Name")) }
+                        else try {
+                            val values = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, filename) }
+                            if (contentResolver.update(uri, values, null, null) == 0) error("Rename not permitted")
+                            showScans()
+                        } catch (e: Exception) { message(translated("Rename failed: ${e.message}", "Přejmenování selhalo: ${e.message}", "Umbenennen fehlgeschlagen: ${e.message}")) }
+                    }
+                }
+                6 -> { if (!selectedScans.add(uri)) selectedScans.remove(uri); showScans() }
+                7 -> {
+                    val size = try { contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L } catch (_: Exception) { -1L }
+                    AlertDialog.Builder(this).setTitle(name).setMessage("${scanMime(name)}\n${if (size >= 0) "$size bytes" else "Size unknown"}\n$uri")
+                        .setPositiveButton("OK", null).show()
+                }
+                8 -> {
+                    selectedScans.clear(); selectedScans.add(uri)
+                    confirm(translated("Delete $name?", "Smazat $name?", "$name löschen?")) {
+                        if (Build.VERSION.SDK_INT >= 30) try {
+                            pendingScanDeletion = true
+                            val req = MediaStore.createDeleteRequest(contentResolver, listOf(uri))
+                            startIntentSenderForResult(req.intentSender, photoDeleteRequest, null, 0, 0, 0)
+                        } catch (e: Exception) { message("${e.message}") }
+                        else { try { contentResolver.delete(uri, null, null) } catch (_: Exception) {}; selectedScans.clear(); showScans() }
+                    }
+                }
+            }
+        }.show()
+    }
+
     private fun showScans() {
         mode = "scans"; screen("Moje skeny"); enableGalleryScrolling()
         action(translated("← Home", "← Domů", "← Home")) { home() }
@@ -1783,9 +2324,8 @@ class MainActivity : Activity() {
             }
         }
         scans.forEach { (uri, name) ->
-            action("${if (uri in selectedScans) "☑" else "☐"}  $name") {
-                if (!selectedScans.add(uri)) selectedScans.remove(uri)
-                showScans()
+            action("${if (uri in selectedScans) "☑  " else "📄  "}$name   ⋮") {
+                scanActions(uri, name)
             }
         }
         action(translated("↻ Refresh", "↻ Obnovit", "↻ Refresh")) { showScans() }

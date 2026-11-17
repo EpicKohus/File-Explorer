@@ -1,6 +1,6 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 android { namespace = "cz.fileexplorer"; compileSdk = 35
-    defaultConfig { applicationId = "cz.fileexplorer.community"; minSdk = 26; targetSdk = 35; versionCode = 35; versionName = "3.5-community" }
+    defaultConfig { applicationId = "cz.fileexplorer.community"; minSdk = 26; targetSdk = 35; versionCode = 39; versionName = "3.9" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
 }
